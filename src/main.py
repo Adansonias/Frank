@@ -24,10 +24,6 @@ while True:
     now = datetime.now(eastern)
     print("Heartbeat:", now.strftime("%H:%M:%S"))
 
-    if now.minute % config.DECISION_INTERVAL_MIN != 0:
-        time.sleep(30)
-        continue
-
     for ticker in config.TICKERS:
         df = get_latest_data(ticker)
         if df is None or len(df) < 10:
