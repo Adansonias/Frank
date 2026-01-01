@@ -11,6 +11,11 @@ from broker import Broker
 from risk import allowed_to_trade
 from logger import log_decision
 
+def get_market_prices(broker, latest_price, ticker):
+    prices = {}
+    for t in broker.positions:
+        prices[t] = latest_price if t == ticker else broker.positions[t]["entry_price"]
+    return prices
 
 # Create broker (paper mode)
 broker = Broker(starting_cash=config.AI_CAPITAL, name="frank")
@@ -24,6 +29,11 @@ while True:
     now = datetime.now(eastern)
     print("Heartbeat:", now.strftime("%H:%M:%S"))
 
+    # --- TIMING GATE ---
+    if now.minute % config.DECISION_INTERVAL_MIN != 0:
+        time.sleep(30)
+        continue
+
     for ticker in config.TICKERS:
         df = get_latest_data(ticker)
         if df is None or len(df) < 10:
@@ -31,12 +41,17 @@ while True:
 
         signals = compute_signals(df)
         score = score_signals(signals)
-        price = df["Close"].iloc[-1]
+
+        # FORCE price to be scalar
+        price = float(df["Close"].iloc[-1].item())
 
         decision = "NO TRADE"
 
         # --- BUY ---
-        if score > config.BUY_THRESHOLD and allowed_to_trade(trades_today, config.MAX_TRADES_PER_DAY):
+        if (
+            score > config.BUY_THRESHOLD
+            and allowed_to_trade(trades_today, config.MAX_TRADES_PER_DAY)
+        ):
             amount = broker.cash * config.MAX_POSITION_PCT
             if broker.buy(ticker, price, amount):
                 trades_today += 1
@@ -48,11 +63,12 @@ while True:
             if pnl is not False:
                 decision = "SELL"
 
-        # --- PnL + Equity ---
-        prices = {ticker: price}
+        # --- Equity ---
+        prices = get_market_prices(broker, price, ticker)
         equity = broker.equity(prices)
 
-        # --- LOG EVERYTHING ---
+
+        # --- LOG ---
         log_decision(
             ticker,
             signals,
@@ -64,6 +80,4 @@ while True:
             equity
         )
 
-    if now.minute % config.DECISION_INTERVAL_MIN != 0:
-        time.sleep(30)
-        continue
+    time.sleep(60)
