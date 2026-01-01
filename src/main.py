@@ -63,3 +63,7 @@ while True:
             broker.realized_pnl,
             equity
         )
+
+    if now.minute % config.DECISION_INTERVAL_MIN != 0:
+        time.sleep(30)
+        continue
