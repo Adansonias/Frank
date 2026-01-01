@@ -1,6 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from project_root import get_project_root
 
 plt.style.use("default")
 
@@ -10,7 +11,10 @@ def update(frame):
     ax.clear()
 
     try:
-        df = pd.read_csv("logs.csv")
+        project_root = get_project_root()
+        logs_path = project_root / "log/logs.csv"
+        logs_path_str = str(logs_path)
+        df = pd.read_csv(logs_path_str)
     except Exception:
         return
 

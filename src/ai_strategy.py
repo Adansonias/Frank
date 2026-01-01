@@ -8,9 +8,9 @@ def compute_signals(df):
     volatility = closes.pct_change().iloc[-10:].std()
 
     return {
-        "trend": float(short_trend),
-        "momentum": float(momentum),
-        "volatility": float(volatility)
+        "trend": short_trend.iloc[0],
+        "momentum": momentum.iloc[0],
+        "volatility": volatility.iloc[0]
     }
 
 
