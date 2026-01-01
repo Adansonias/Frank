@@ -31,3 +31,11 @@ The final step is to run the main.py script to start up the project
 ```bash
 python src/main.py
 ```
+
+## Running the charting script
+
+To see the live updated state of the bot, run the `chart.py` script
+
+```bash
+python src/chart.py
+```
