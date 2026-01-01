@@ -63,5 +63,3 @@ while True:
             broker.realized_pnl,
             equity
         )
-
-    time.sleep(60)
