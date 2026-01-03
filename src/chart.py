@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from project_root import get_project_root
+from pathlib import Path
 
 # --------------------
 # Chart setup
@@ -11,60 +12,60 @@ fig, ax = plt.subplots(figsize=(12, 6))
 ax2 = None  # will be created inside update()
 
 
+# --------------------
+# Load all daily logs
+# --------------------
+def load_all_logs():
+    project_root = get_project_root()
+    log_root = project_root / "log"
+
+    frames = []
+
+    for day_dir in sorted(log_root.iterdir()):
+        if not day_dir.is_dir():
+            continue
+
+        csv_path = day_dir / "decisions.csv"
+        if csv_path.exists():
+            try:
+                df = pd.read_csv(csv_path)
+                df["log_day"] = day_dir.name
+                frames.append(df)
+            except Exception:
+                continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
+# --------------------
+# Update plot
+# --------------------
 def update(frame):
     global ax2
-
     ax.clear()
+    ax2 = ax.twinx()  # recreate secondary axis each update
 
-    # Recreate secondary axis EVERY update (important!)
-    ax2 = ax.twinx()
-
-    # --------------------
-    # Locate logs.csv
-    # --------------------
-    project_root = get_project_root()
-    logs_path = project_root / "log" / "logs.csv"
-
-    if not logs_path.exists():
-        ax.set_title("logs.csv not found")
-        return
-
-    # --------------------
-    # Load CSV
-    # --------------------
-    try:
-        df = pd.read_csv(logs_path)
-    except Exception as e:
-        ax.set_title(f"CSV read error: {e}")
-        return
-
+    # Load logs
+    df = load_all_logs()
     if df.empty:
-        ax.set_title("logs.csv is empty (no data yet)")
+        ax.set_title("No logs found")
         return
 
-    # --------------------
-    # Parse timestamps
-    # --------------------
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"],
-        format="%Y-%m-%d %H:%M:%S",
-        errors="coerce"
-    )
+    # Parse timestamps safely
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"])
-
     if df.empty:
-        ax.set_title("No valid timestamps in logs.csv")
+        ax.set_title("No valid timestamps in logs")
         return
 
-    # --------------------
-    # Default view: last 7 days
-    # --------------------
+    # Last 7 days
     end_time = df["timestamp"].max()
     start_time = end_time - pd.Timedelta(days=7)
 
-    # --------------------
     # Plot per ticker
-    # --------------------
     for ticker in df["ticker"].unique():
         sub = df[df["ticker"] == ticker]
 
@@ -75,28 +76,14 @@ def update(frame):
             linewidth=1.5
         )
 
-        buys = sub[sub["decision"] == "BUY"]
-        sells = sub[sub["decision"] == "SELL"]
+        # Buy/sell markers
+        buys = sub[sub["decision"].str.contains("BUY")]
+        sells = sub[sub["decision"].str.contains("SELL")]
 
-        ax.scatter(
-            buys["timestamp"],
-            buys["score"],
-            marker="^",
-            s=100,
-            alpha=0.9
-        )
+        ax.scatter(buys["timestamp"], buys["score"], marker="^", s=100, alpha=0.9)
+        ax.scatter(sells["timestamp"], sells["score"], marker="v", s=100, alpha=0.9)
 
-        ax.scatter(
-            sells["timestamp"],
-            sells["score"],
-            marker="v",
-            s=100,
-            alpha=0.9
-        )
-
-    # --------------------
     # Equity curve
-    # --------------------
     if "equity" in df.columns:
         equity_df = df.sort_values("timestamp")
         ax2.plot(
@@ -109,12 +96,9 @@ def update(frame):
         )
         ax2.set_ylabel("Equity ($)")
 
-    # --------------------
     # Styling
-    # --------------------
     ax.axhline(0, linestyle="--", linewidth=1, alpha=0.6)
     ax.set_xlim(start_time, end_time)
-
     ax.set_title("Frank — Live Signal Monitor (Last 7 Days)")
     ax.set_xlabel("Time")
     ax.set_ylabel("Score")

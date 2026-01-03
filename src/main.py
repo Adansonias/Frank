@@ -24,7 +24,6 @@ LOWER_QUANTILE = 0.20
 CONFIDENCE_DECAY = 0.97
 EXIT_DECAY_THRESHOLD = 0.25
 
-# Market close behavior
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MINUTE = 0
 CLOSE_BUFFER_MINUTES = 10
@@ -42,7 +41,6 @@ score_history = {
 
 entry_confidence = {}
 entry_confidence_original = {}
-
 last_trade_day = None
 
 
@@ -56,10 +54,8 @@ def get_market_prices(broker, latest_price, current_ticker):
         for t in broker.positions
     }
 
-
 def get_last_price(df):
     return float(df["Close"].iloc[-1].item())
-
 
 def minutes_to_market_close(now):
     close_time = now.replace(
@@ -70,9 +66,48 @@ def minutes_to_market_close(now):
     )
     return (close_time - now).total_seconds() / 60
 
-
 def is_near_market_close(now):
     return 0 <= minutes_to_market_close(now) <= CLOSE_BUFFER_MINUTES
+
+
+# -------------------------------------------------
+# MARKET HOURS GATE  <<< IMPORTANT
+# -------------------------------------------------
+
+def is_market_open(now):
+    if now.weekday() >= 5:
+        return False
+
+    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    return open_time <= now <= close_time
+
+
+# -------------------------------------------------
+# REGIME CLASSIFICATION
+# -------------------------------------------------
+
+def classify_regime(signals, volatility_history):
+    if len(volatility_history) < 20:
+        return "UNKNOWN"
+
+    trend = signals["trend"]
+    momentum = signals["momentum"]
+    volatility = signals["volatility"]
+
+    vol_series = pd.Series(volatility_history)
+    if volatility >= vol_series.quantile(0.80):
+        return "HIGH_VOL"
+    if volatility <= vol_series.quantile(0.20):
+        return "LOW_VOL"
+
+    if trend > 0 and momentum > 0:
+        return "TREND_UP"
+    if trend < 0 and momentum < 0:
+        return "TREND_DOWN"
+
+    return "CHOPPY"
 
 
 # -------------------------------------------------
@@ -83,8 +118,7 @@ broker = Broker(starting_cash=config.AI_CAPITAL, name="frank")
 trades_today = 0
 
 eastern = pytz.timezone(config.MARKET_TIMEZONE)
-
-print("AI Trader started (paper mode with PnL)")
+print("AI Trader started")
 
 
 # -------------------------------------------------
@@ -95,10 +129,15 @@ while True:
     now = datetime.now(eastern)
     today = now.date()
 
-    # Reset daily trades safely
+    # Reset daily trade counter
     if last_trade_day != today:
         trades_today = 0
         last_trade_day = today
+
+    # ⛔ HARD STOP AFTER MARKET CLOSE <<< THIS FIXES YOUR ISSUE
+    if not is_market_open(now) and not is_near_market_close(now):
+        time.sleep(300)  # sleep 5 minutes quietly
+        continue
 
     # Timing gate
     if now.minute % config.DECISION_INTERVAL_MIN != 0:
@@ -114,6 +153,8 @@ while True:
         score = score_signals(signals)
         price = get_last_price(df)
 
+        regime = classify_regime(signals, score_history[ticker])
+
         score_history[ticker].append(score)
         history = score_history[ticker]
 
@@ -124,7 +165,7 @@ while True:
         current_confidence = None
         near_close = is_near_market_close(now)
 
-        # ---------------- MARKET CLOSE HANDLER ----------------
+        # -------- Market close handler --------
         if near_close and ticker in broker.positions:
             current_confidence = entry_confidence[ticker]
             original = entry_confidence_original[ticker]
@@ -135,12 +176,9 @@ while True:
                 decision_reason = "market_close_exit"
                 entry_confidence.pop(ticker, None)
                 entry_confidence_original.pop(ticker, None)
-            else:
-                decision = "HOLD"
-                decision_reason = "overnight_hold"
 
-        # ---------------- NORMAL TRADING ----------------
-        elif len(history) >= MIN_HISTORY_FOR_TRADE:
+        # -------- Normal trading --------
+        elif len(history) >= MIN_HISTORY_FOR_TRADE and regime != "HIGH_VOL":
             series = pd.Series(history)
             high_thresh = series.quantile(UPPER_QUANTILE)
             low_thresh = series.quantile(LOWER_QUANTILE)
@@ -180,12 +218,8 @@ while True:
             broker.cash,
             broker.realized_pnl,
             equity,
-            high_thresh,
-            low_thresh,
-            entry_confidence_original.get(ticker),
-            current_confidence,
-            near_close,
-            decision_reason
+            regime=regime,
+            decision_reason=decision_reason
         )
 
     time.sleep(60)

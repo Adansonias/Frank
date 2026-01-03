@@ -1,11 +1,20 @@
+# logger.py
+
 import csv
 from datetime import datetime
 from pathlib import Path
 from project_root import get_project_root
 
-LOG_PATH = get_project_root() / "log"
-LOG_PATH.mkdir(exist_ok=True)
-LOG_FILE = LOG_PATH / "logs.csv"
+
+def get_daily_log_path():
+    """
+    Create /log/YYYY-MM-DD.csv automatically.
+    """
+    root = get_project_root() / "log"
+    root.mkdir(exist_ok=True)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    return root / f"{today}.csv"
 
 
 def log_decision(
@@ -22,30 +31,44 @@ def log_decision(
     entry_confidence=None,
     current_confidence=None,
     near_market_close=False,
-    decision_reason="none"
+    decision_reason="none",
+    regime="UNKNOWN"
 ):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    file_exists = LOG_FILE.exists()
+    log_file = get_daily_log_path()
+    file_exists = log_file.exists()
 
-    with open(LOG_FILE, "a", newline="") as f:
+    # ---- Console output ----
+    print(f"\n[{timestamp}] {ticker}")
+    print(f"  regime: {regime}")
+    for k, v in signals.items():
+        print(f"  {k}: {v:.6f}")
+    print(f"  score: {score:.6f}")
+    print(f"  decision: {decision} ({decision_reason})")
+    print(f"  price: {price:.2f}")
+    print(f"  equity: {equity:.2f}")
+
+    # ---- CSV output ----
+    with open(log_file, "a", newline="") as f:
         writer = csv.writer(f)
 
         if not file_exists:
             writer.writerow([
                 "timestamp",
                 "ticker",
+                "regime",
                 "trend",
                 "momentum",
                 "volatility",
                 "score",
+                "high_thresh",
+                "low_thresh",
                 "decision",
                 "decision_reason",
                 "price",
                 "cash",
                 "realized_pnl",
                 "equity",
-                "high_threshold",
-                "low_threshold",
                 "entry_confidence",
                 "current_confidence",
                 "near_market_close"
@@ -54,18 +77,19 @@ def log_decision(
         writer.writerow([
             timestamp,
             ticker,
+            regime,
             signals["trend"],
             signals["momentum"],
             signals["volatility"],
             score,
+            high_thresh,
+            low_thresh,
             decision,
             decision_reason,
             price,
             cash,
             realized_pnl,
             equity,
-            high_thresh,
-            low_thresh,
             entry_confidence,
             current_confidence,
             near_market_close
