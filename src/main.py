@@ -1,8 +1,8 @@
-# main.py
-
 import time
 from datetime import datetime
 import pytz
+from collections import deque
+import pandas as pd
 
 import config
 from data import get_latest_data
@@ -11,18 +11,113 @@ from broker import Broker
 from risk import allowed_to_trade
 from logger import log_decision
 
+# -------------------------------------------------
+# PARAMETERS
+# -------------------------------------------------
 
-# Create broker (paper mode)
-broker = Broker(starting_cash=config.AI_CAPITAL, name="frank")
+SCORE_HISTORY_LENGTH = 50
+MIN_HISTORY_FOR_TRADE = 20
+UPPER_QUANTILE = 0.80
+LOWER_QUANTILE = 0.20
+
+CONFIDENCE_DECAY = 0.97
+EXIT_DECAY_THRESHOLD = 0.25
+
+MARKET_CLOSE_HOUR = 16
+MARKET_CLOSE_MINUTE = 0
+CLOSE_BUFFER_MINUTES = 10
+OVERNIGHT_HOLD_THRESHOLD = 0.6
+
+# -------------------------------------------------
+# STATE
+# -------------------------------------------------
+
+score_history = {ticker: deque(maxlen=SCORE_HISTORY_LENGTH) for ticker in config.TICKERS}
+volatility_history = {ticker: deque(maxlen=SCORE_HISTORY_LENGTH) for ticker in config.TICKERS}
+entry_confidence = {}
+entry_confidence_original = {}
+last_trade_day = None
+
+# -------------------------------------------------
+# HELPERS
+# -------------------------------------------------
+
+def get_last_price(df):
+    return float(df["Close"].iloc[-1].item())
+
+def minutes_to_market_close(now):
+    close_time = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE,
+                             second=0, microsecond=0)
+    return (close_time - now).total_seconds() / 60
+
+def is_near_market_close(now):
+    return 0 <= minutes_to_market_close(now) <= CLOSE_BUFFER_MINUTES
+
+def is_market_open(now):
+    if now.weekday() >= 5:
+        return False
+    open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return open_time <= now <= close_time
+
+# -------------------------------------------------
+# REGIME CLASSIFICATION
+# -------------------------------------------------
+
+def classify_regime(signals, vol_history):
+    if len(vol_history) < 20:
+        return "UNKNOWN"
+
+    trend = signals["trend"]
+    momentum = signals["momentum"]
+    volatility = signals["volatility"]
+    vol_series = pd.Series(vol_history)
+
+    if volatility >= vol_series.quantile(0.80):
+        return "HIGH_VOL"
+    if volatility <= vol_series.quantile(0.20):
+        return "LOW_VOL"
+    if trend > 0 and momentum > 0:
+        return "TREND_UP"
+    if trend < 0 and momentum < 0:
+        return "TREND_DOWN"
+    return "CHOPPY"
+
+# -------------------------------------------------
+# BROKER
+# -------------------------------------------------
+
+broker = Broker(
+    starting_cash=config.AI_CAPITAL,
+    name="frank",
+    commission_per_trade=0.005,
+    spread_pct=0.0005,
+    slippage_pct=0.0003
+)
 trades_today = 0
-
 eastern = pytz.timezone(config.MARKET_TIMEZONE)
 
-print("AI Trader started (paper mode with PnL)")
+print("AI Trader started")
+
+# -------------------------------------------------
+# MAIN LOOP
+# -------------------------------------------------
 
 while True:
     now = datetime.now(eastern)
-    print("Heartbeat:", now.strftime("%H:%M:%S"))
+    today = now.date()
+
+    if last_trade_day != today:
+        trades_today = 0
+        last_trade_day = today
+
+    if not is_market_open(now) and not is_near_market_close(now):
+        time.sleep(300)
+        continue
+
+    if now.minute % config.DECISION_INTERVAL_MIN != 0:
+        time.sleep(30)
+        continue
 
     for ticker in config.TICKERS:
         df = get_latest_data(ticker)
@@ -31,28 +126,64 @@ while True:
 
         signals = compute_signals(df)
         score = score_signals(signals)
-        price = df["Close"].iloc[-1]
+        price = get_last_price(df)
 
-        decision = "NO TRADE"
+        score_history[ticker].append(score)
+        volatility_history[ticker].append(signals["volatility"])
 
-        # --- BUY ---
-        if score > config.BUY_THRESHOLD and allowed_to_trade(trades_today, config.MAX_TRADES_PER_DAY):
-            amount = broker.cash * config.MAX_POSITION_PCT
-            if broker.buy(ticker, price, amount):
-                trades_today += 1
-                decision = "BUY"
+        regime = classify_regime(signals, volatility_history[ticker])
+        history = score_history[ticker]
 
-        # --- SELL ---
-        elif score < config.SELL_THRESHOLD:
-            pnl = broker.sell(ticker, price)
-            if pnl is not False:
+        decision = "HOLD"
+        decision_reason = "none"
+        near_close = is_near_market_close(now)
+
+        # -------- Market close handler --------
+        if near_close and ticker in broker.positions:
+            current = entry_confidence[ticker]
+            original = entry_confidence_original[ticker]
+
+            if abs(current) < OVERNIGHT_HOLD_THRESHOLD * abs(original):
+                broker.sell(ticker, price)
                 decision = "SELL"
+                decision_reason = "market_close_exit"
+                entry_confidence.pop(ticker, None)
+                entry_confidence_original.pop(ticker, None)
 
-        # --- PnL + Equity ---
-        prices = {ticker: price}
-        equity = broker.equity(prices)
+        # -------- Normal trading --------
+        elif len(history) >= MIN_HISTORY_FOR_TRADE and regime != "HIGH_VOL":
+            series = pd.Series(history)
+            high = series.quantile(UPPER_QUANTILE)
+            low = series.quantile(LOWER_QUANTILE)
 
-        # --- LOG EVERYTHING ---
+            strong_up = score > high and signals["trend"] > 0 and signals["momentum"] > 0
+            strong_down = score < low and signals["trend"] < 0 and signals["momentum"] < 0
+
+            # ✅ Corrected REGIME GATING & allowed_to_trade
+            if (regime in ("TREND_UP", "LOW_VOL")
+                and strong_up
+                and ticker not in broker.positions
+                and allowed_to_trade(trades_today, config.MAX_TRADES_PER_DAY)):
+
+                amount = broker.cash * config.MAX_POSITION_PCT
+                if broker.buy(ticker, price, amount):
+                    entry_confidence[ticker] = score
+                    entry_confidence_original[ticker] = score
+                    trades_today += 1
+                    decision = "BUY"
+                    decision_reason = "strong_up_signal"
+
+            elif ticker in broker.positions:
+                entry_confidence[ticker] *= CONFIDENCE_DECAY
+                if abs(entry_confidence[ticker]) < EXIT_DECAY_THRESHOLD * abs(entry_confidence_original[ticker]):
+                    broker.sell(ticker, price)
+                    decision = "SELL"
+                    decision_reason = "confidence_decay_exit"
+                    entry_confidence.pop(ticker, None)
+                    entry_confidence_original.pop(ticker, None)
+
+        equity = broker.equity({ticker: price})
+
         log_decision(
             ticker,
             signals,
@@ -61,9 +192,9 @@ while True:
             price,
             broker.cash,
             broker.realized_pnl,
-            equity
+            equity,
+            regime=regime,
+            decision_reason=decision_reason
         )
 
-    if now.minute % config.DECISION_INTERVAL_MIN != 0:
-        time.sleep(30)
-        continue
+    time.sleep(60)
